@@ -133,6 +133,16 @@ Expected output:
   1 duplicate(s) identified (0.5%)
 ```
 
+Visualise the result. Each ROI image is its own crop, located at
+`--base-path` / `filename`:
+
+```bash
+python src/visualize_dedup.py \
+    --dedup data/April_20_2026_lowmag_level2_with_depth_time_with_depth_time_tiny_dedup.parquet \
+    --base-path /Volumes/DeepSea-AI/data/Planktivore/raw/2026_April_20_Ahi-Planktivore/low_mag_cam/ \
+    --out data/April_20_2026_lowmag_dedup.gif
+```
+
 ---
 
 ## Usage

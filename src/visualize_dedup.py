@@ -12,6 +12,11 @@ Usage:
     python3 visualize_dedup.py [--dedup ptvr_lm/localizations_dedup.csv]
                                [--crops ptvr_lm/crops/Velella_velella]
                                [--out dedup_visualization.gif]
+
+    # CFE lab parquet output: each ROI image is the crop, at base-path/filename
+    python3 visualize_dedup.py --dedup tiny_dedup.parquet
+                               --base-path /Volumes/DeepSea-AI/.../low_mag_cam/
+                               [--out dedup_visualization.gif]
 """
 
 import argparse
@@ -48,18 +53,44 @@ ACCENT      = '#58a6ff'
 # Helpers
 # ---------------------------------------------------------------------------
 
-def load_dedup(csv_path: str) -> pd.DataFrame:
-    df = pd.read_csv(csv_path)
+def load_dedup(path: str) -> pd.DataFrame:
+    if Path(path).suffix.lower() == '.parquet':
+        df = pd.read_parquet(path)
+    else:
+        df = pd.read_csv(path)
     df['time_s'] = pd.to_numeric(df['time_s'], errors='coerce')
     df['depth']  = pd.to_numeric(df['depth'],  errors='coerce')
     return df
 
 
-def load_crop(crops_dir: Path, uuid: str) -> Image.Image | None:
-    for ext in ('.jpg', '.jpeg', '.png'):
-        p = crops_dir / (uuid + ext)
+def crop_candidates(row: pd.Series, crops_dir: Path | None,
+                    base_path: str | None) -> list[Path]:
+    """Possible crop locations for a detection, in priority order.
+
+    Parquet rows: base_path / filename, then the stored image_path.
+    CSV rows: crops_dir / <uuid>.{jpg,jpeg,png}.
+    """
+    paths: list[Path] = []
+    filename = row.get('filename')
+    if base_path and isinstance(filename, str):
+        paths.append(Path(base_path) / filename)
+    image_path = row.get('image_path')
+    if isinstance(image_path, str):
+        paths.append(Path(image_path))
+    uuid = row.get('uuid')
+    if crops_dir is not None and isinstance(uuid, str):
+        paths.extend(crops_dir / (uuid + ext) for ext in ('.jpg', '.jpeg', '.png'))
+    return paths
+
+
+def load_crop(row: pd.Series, crops_dir: Path | None,
+              base_path: str | None) -> Image.Image | None:
+    candidates = crop_candidates(row, crops_dir, base_path)
+    for p in candidates:
         if p.exists():
             return Image.open(p).convert('RGB')
+    tried = ', '.join(str(p) for p in candidates[:2]) or 'no candidate paths'
+    print(f"    Warning: crop not found (tried {tried})")
     return None
 
 
@@ -184,8 +215,9 @@ def make_pair_frame(
     tid: int,
     pair_idx: int,
     n_pairs: int,
-    crops_dir: Path,
+    crops_dir: Path | None,
     all_dup_tracks: list[int],
+    base_path: str | None = None,
 ) -> plt.Figure:
     group = df[df['track_id'] == tid].sort_values('time_s').reset_index(drop=True)
     canonical = group.iloc[0]
@@ -222,7 +254,7 @@ def make_pair_frame(
             spine.set_edgecolor(color)
 
     # --- Crop A (canonical) ---
-    img_a = load_crop(crops_dir, canonical['uuid'])
+    img_a = load_crop(canonical, crops_dir, base_path)
     if img_a:
         ax_img_a.imshow(thumb(img_a, 240), aspect='auto')
     else:
@@ -237,7 +269,7 @@ def make_pair_frame(
     )
 
     # --- Crop B (duplicate) ---
-    img_b = load_crop(crops_dir, duplicate['uuid'])
+    img_b = load_crop(duplicate, crops_dir, base_path)
     if img_b:
         ax_img_b.imshow(thumb(img_b, 240), aspect='auto')
     else:
@@ -364,9 +396,12 @@ def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument('--dedup',  default='ptvr_lm/localizations_dedup.csv',
-                   help='De-dup CSV produced by hungarian_dedup.py')
+                   help='De-dup CSV or parquet produced by hungarian_dedup.py')
     p.add_argument('--crops',  default='ptvr_lm/crops/Velella_velella',
-                   help='Directory of crop images named <uuid>.jpg')
+                   help='Directory of crop images named <uuid>.jpg (CSV input)')
+    p.add_argument('--base-path', default=None,
+                   help='Directory joined onto the filename column to locate '
+                        'each crop (parquet input). Falls back to image_path.')
     p.add_argument('--out',    default='dedup_visualization.gif',
                    help='Output GIF path')
     p.add_argument('--dpi',    type=int, default=100)
@@ -401,7 +436,8 @@ def main() -> None:
     # --- One frame per duplicate pair ---
     for i, tid in enumerate(dup_tracks):
         print(f"  Rendering pair frame {i+1}/{len(dup_tracks)}  (track {tid}) ...")
-        fig = make_pair_frame(df, tid, i, len(dup_tracks), crops, dup_tracks)
+        fig = make_pair_frame(df, tid, i, len(dup_tracks), crops, dup_tracks,
+                              base_path=args.base_path)
         gif_frames.append(fig_to_pil(fig))
         plt.close(fig)
 
