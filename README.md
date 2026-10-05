@@ -15,8 +15,13 @@ particle only once.
 
 ## How it works
 
-Detection metadata (box position, depth, timestamp) is parsed directly from
-image filenames:
+CSV detections take box position and timestamp from the image filename, and
+depth from `localizations.csv`. CFE lab parquet files already carry
+`filename`, `epoch_seconds` (camera time in microseconds), `time`, and
+`depth`. Pass `--base-path` to join that directory onto each relative
+`filename` and store the full image path.
+
+Box position is still parsed from the filename:
 
 ```
 low_mag_cam-{timestamp_us}-{session}-…-{y}-{x}-{h}-{w}-{ignored}_rawcolor.jpg
@@ -108,6 +113,12 @@ python src/hungarian_dedup.py data/ptvr_lm/localizations.csv \
     --frame-gap 2.0 \
     --time-gate 600
 
+# CFE lab parquet (filename is relative to the camera directory):
+python src/hungarian_dedup.py \
+    data/April_20_2026_lowmag_level2_with_depth_time_with_depth_time_tiny.parquet \
+    --base-path /mnt/DeepSea-AI/data/Planktivore/raw/2026_April_20_Ahi-Planktivore/low_mag_cam/ \
+    -o data/April_20_2026_lowmag_dedup.csv
+
 # Visualise results:
 python src/visualize_dedup.py \
     --dedup data/ptvr_lm/localizations_dedup.csv \
@@ -123,6 +134,7 @@ pandas
 scipy
 Pillow
 matplotlib
+pyarrow
 ```
  
 ## AI Disclosure

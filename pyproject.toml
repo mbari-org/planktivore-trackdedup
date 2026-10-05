@@ -17,6 +17,7 @@ pandas = "*"
 scipy = "*"
 Pillow = "*"
 matplotlib = "*"
+pyarrow = "*"
 
 [tool.semantic_release]
 branch = "main"

@@ -10,7 +10,11 @@ Filename format:
   low_mag_cam-{timestamp_us}-{session}-{...}-{x}-{y}-{w}-{h}_rawcolor.jpg
   Last 4 dash-separated numbers before _rawcolor are x, y, w, h (pixels).
 
-Depth and label metadata come from localizations.csv.
+Inputs:
+  localizations.csv — depth and label metadata, box from the media filename.
+  CFE lab *.parquet — filename, epoch_seconds, time, and depth columns.
+  Parquet filename values are relative; pass --base-path to build the full
+  image path (base-path / filename).
 """
 
 import argparse
@@ -74,41 +78,183 @@ def parse_filename(fname: str) -> dict | None:
 # Data loading
 # ---------------------------------------------------------------------------
 
-def load_localizations(csv_path: str) -> pd.DataFrame:
-    """
-    Load localizations.csv and enrich with parsed filename fields.
+def resolve_image_path(filename: str, base_path: str | None) -> str:
+    """Join a relative filename onto base_path. Absolute paths are unchanged."""
+    name = str(filename)
+    if not base_path:
+        return name
+    path = Path(name)
+    if path.is_absolute():
+        return name
+    return str(Path(base_path) / path)
 
-    The CSV may have two columns both named 'iso_datetime'; pandas will
-    rename the second one to 'iso_datetime.1'. We prefer the UTC one
-    (contains '+00:00').
-    """
-    df = pd.read_csv(csv_path)
 
-    # Parse filenames; rows that don't match the pattern are dropped
-    parsed_raw = df['media'].apply(parse_filename)
+def epoch_to_time_s(epoch: pd.Series) -> pd.Series:
+    """Convert an epoch column to Unix seconds.
+
+    CFE lab parquet names this column ``epoch_seconds``, but the stored
+    values are the camera timestamp in microseconds — the same integer
+    embedded in the image filename. Magnitudes at or above 1e14 are treated
+    as microseconds, at or above 1e11 as milliseconds, and smaller values
+    as seconds.
+    """
+    values = pd.to_numeric(epoch, errors='coerce')
+    median = values.dropna().median()
+    if pd.isna(median):
+        return values
+    if median >= 1e14:
+        return values / 1e6
+    if median >= 1e11:
+        return values / 1e3
+    return values
+
+
+def _datetime_to_time_s(series: pd.Series) -> pd.Series:
+    dt = pd.to_datetime(series, utc=True, errors='coerce')
+    epoch = pd.Timestamp('1970-01-01', tz='UTC')
+    return (dt - epoch).dt.total_seconds()
+
+
+def _map_model_label(df: pd.DataFrame) -> pd.DataFrame:
+    """Copy a dinov3 label/score pair onto Label and score when those are absent."""
+    if 'label' in df.columns and 'Label' not in df.columns:
+        df['Label'] = df['label']
+    if 'Label' in df.columns:
+        return df
+
+    label_cols = [
+        name for name in df.columns
+        if str(name).lower().startswith('dinov3')
+        and not str(name).lower().endswith('-score')
+    ]
+    if len(label_cols) != 1:
+        return df
+
+    label_col = label_cols[0]
+    df['Label'] = df[label_col]
+    score_col = f'{label_col}-score'
+    if score_col in df.columns and 'score' not in df.columns:
+        df['score'] = pd.to_numeric(df[score_col], errors='coerce')
+    return df
+
+
+def _ensure_filename_column(df: pd.DataFrame) -> pd.DataFrame:
+    """Require a filename column, or adopt the first column when it holds paths."""
+    if 'filename' in df.columns:
+        return df
+    first = df.columns[0]
+    sample = df[first].astype(str).head(20)
+    if sample.str.contains(r'cam-\d+-', regex=True).any():
+        print(f"  Warning: no 'filename' column; using first column {first!r}.")
+        return df.rename(columns={first: 'filename'})
+    raise SystemExit(
+        "Error: parquet is missing required column 'filename' "
+        f"(columns: {list(df.columns)})"
+    )
+
+
+def _attach_filename_fields(df: pd.DataFrame, filename_col: str) -> pd.DataFrame:
+    """Parse box geometry from filenames and drop rows that do not match."""
+    parsed_raw = df[filename_col].apply(parse_filename)
     unparseable = parsed_raw.isna()
     if unparseable.any():
-        n_skip = unparseable.sum()
-        skipped = df.loc[unparseable, 'media'].tolist()
+        n_skip = int(unparseable.sum())
+        skipped = df.loc[unparseable, filename_col].astype(str).tolist()
         print(f"  Warning: skipping {n_skip} row(s) with non-standard filenames:")
-        for s in skipped[:10]:
-            print(f"    {s}")
+        for name in skipped[:10]:
+            print(f"    {name}")
         if n_skip > 10:
             print(f"    … and {n_skip - 10} more")
-        df = df[~unparseable].reset_index(drop=True)
-        parsed_raw = parsed_raw[~unparseable].reset_index(drop=True)
+        df = df.loc[~unparseable].reset_index(drop=True)
+        parsed_raw = parsed_raw.loc[~unparseable].reset_index(drop=True)
 
     parsed = parsed_raw.apply(pd.Series)
-    df = pd.concat([df.reset_index(drop=True), parsed], axis=1)
+    # Column clocks override the timestamp embedded in the filename.
+    parsed = parsed.drop(columns=['time_s'], errors='ignore')
+    return pd.concat([df.reset_index(drop=True), parsed], axis=1)
 
-    # Choose the UTC datetime column
-    if 'iso_datetime.1' in df.columns:
+
+def _assign_time(df: pd.DataFrame) -> pd.DataFrame:
+    """Set time_s and datetime_utc from epoch_seconds, time, or the filename."""
+    if 'epoch_seconds' in df.columns:
+        df['time_s'] = epoch_to_time_s(df['epoch_seconds'])
+    elif 'timestamp_us' in df.columns:
+        df['time_s'] = df['timestamp_us'] / 1e6
+
+    if 'time' in df.columns:
+        from_time = _datetime_to_time_s(df['time'])
+        if 'time_s' not in df.columns:
+            df['time_s'] = from_time
+        df['datetime_utc'] = pd.to_datetime(df['time'], utc=True, errors='coerce')
+    elif 'iso_datetime.1' in df.columns:
         df['datetime_utc'] = pd.to_datetime(df['iso_datetime.1'], utc=True, errors='coerce')
-    else:
+    elif 'iso_datetime' in df.columns:
         df['datetime_utc'] = pd.to_datetime(df['iso_datetime'], utc=True, errors='coerce')
+    elif 'time_s' in df.columns:
+        df['datetime_utc'] = pd.to_datetime(df['time_s'], unit='s', utc=True, errors='coerce')
 
-    df = df.sort_values('time_s').reset_index(drop=True)
+    if 'time_s' not in df.columns:
+        raise SystemExit(
+            "Error: could not determine detection time. "
+            "Expected epoch_seconds, time, or a camera timestamp in the filename."
+        )
     return df
+
+
+def load_localizations(path: str, base_path: str | None = None) -> pd.DataFrame:
+    """
+    Load a localizations CSV or a CFE lab parquet file.
+
+    CSV rows use ``media`` for the image name. The CSV may have two columns
+    both named 'iso_datetime'; pandas renames the second to 'iso_datetime.1'.
+    The UTC value (contains '+00:00') is preferred.
+
+    Parquet rows use ``filename`` (relative), ``epoch_seconds``, ``time``,
+    and ``depth``. ``--base-path`` is joined onto each relative filename to
+    form ``image_path``. ``epoch_seconds`` is the camera timestamp in
+    microseconds. ``uuid`` falls back to the relative filename when absent.
+    """
+    source = Path(path)
+    if source.suffix.lower() == '.parquet':
+        try:
+            df = pd.read_parquet(source)
+        except ImportError as exc:
+            raise SystemExit(
+                "Error: reading parquet requires pyarrow. "
+                "Install it with: pip install pyarrow"
+            ) from exc
+        df = _ensure_filename_column(df)
+        df['filename'] = df['filename'].astype(str)
+        if not base_path:
+            print("  Warning: no --base-path given; image_path keeps the relative filename.")
+        df['image_path'] = df['filename'].map(lambda name: resolve_image_path(name, base_path))
+        df['media'] = df['image_path']
+        if 'uuid' not in df.columns:
+            df['uuid'] = df['filename']
+        df = _map_model_label(df)
+        filename_col = 'filename'
+    else:
+        df = pd.read_csv(source)
+        if 'media' not in df.columns:
+            raise SystemExit(
+                "Error: CSV is missing required column 'media' "
+                f"(columns: {list(df.columns)})"
+            )
+        df['media'] = df['media'].astype(str)
+        if base_path:
+            df['image_path'] = df['media'].map(lambda name: resolve_image_path(name, base_path))
+            df['media'] = df['image_path']
+        filename_col = 'media'
+
+    if 'depth' in df.columns:
+        df['depth'] = pd.to_numeric(df['depth'], errors='coerce')
+    else:
+        df['depth'] = np.nan
+    df = _attach_filename_fields(df, filename_col)
+    if df.empty or 'cx' not in df.columns:
+        raise SystemExit("Error: no detections left after parsing filenames.")
+    df = _assign_time(df)
+    return df.sort_values('time_s').reset_index(drop=True)
 
 
 # ---------------------------------------------------------------------------
@@ -343,10 +489,19 @@ def parse_args() -> argparse.Namespace:
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     p.add_argument(
-        'csv_path',
+        'input_path',
         nargs='?',
         default='ptvr_lm/localizations.csv',
-        help='Path to localizations.csv (default: ptvr_lm/localizations.csv)',
+        help='Path to localizations.csv or a CFE lab .parquet file '
+             '(default: ptvr_lm/localizations.csv)',
+    )
+    p.add_argument(
+        '--base-path',
+        default=None,
+        help='Directory joined onto each relative filename to form the full '
+             'image path. Example: '
+             '/mnt/DeepSea-AI/data/Planktivore/raw/'
+             '2026_April_20_Ahi-Planktivore/low_mag_cam/',
     )
     p.add_argument(
         '-o', '--output',
@@ -409,16 +564,18 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
 
-    csv_path = args.csv_path
-    if not Path(csv_path).exists():
-        sys.exit(f"Error: CSV not found: {csv_path}")
+    input_path = args.input_path
+    if not Path(input_path).exists():
+        sys.exit(f"Error: input not found: {input_path}")
 
-    output_path = args.output or (
-        str(Path(csv_path).with_stem(Path(csv_path).stem + '_dedup'))
+    output_path = args.output or str(
+        Path(input_path).with_name(Path(input_path).stem + '_dedup.csv')
     )
 
-    print(f"Loading {csv_path} ...")
-    df = load_localizations(csv_path)
+    print(f"Loading {input_path} ...")
+    if args.base_path:
+        print(f"  base-path: {args.base_path}")
+    df = load_localizations(input_path, base_path=args.base_path)
     print(f"  {len(df)} detections loaded.")
 
     depth_valid = df['depth'].notna().sum()
@@ -474,13 +631,19 @@ def main() -> None:
             print(f"    track {tid:4d}: {cnt} detections  canonical={first_uuid}")
 
     # Save output
-    output_cols = [
-        'media', 'uuid', 'Label', 'depth', 'iso_datetime',
+    preferred = [
+        'media', 'image_path', 'filename', 'uuid', 'Label', 'depth',
+        'iso_datetime', 'time', 'epoch_seconds',
         'cx', 'cy', 'box_x', 'box_y', 'box_w', 'box_h',
         'time_s', 'frame_id', 'track_id', 'canonical_uuid', 'is_duplicate',
         'latitude', 'longitude', 'score',
     ]
-    output_cols = [c for c in output_cols if c in result.columns]
+    if Path(input_path).suffix.lower() == '.parquet':
+        hidden = {'depth_filled'}
+        output_cols = [c for c in preferred if c in result.columns]
+        output_cols += [c for c in result.columns if c not in output_cols and c not in hidden]
+    else:
+        output_cols = [c for c in preferred if c in result.columns]
     result[output_cols].to_csv(output_path, index=False)
     print(f"\nOutput written to: {output_path}")
 
