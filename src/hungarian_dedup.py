@@ -7,7 +7,7 @@ identified by matching on box center (cx, cy), depth, and time using the
 Hungarian algorithm (linear_sum_assignment) with a normalized Euclidean cost.
 
 Filename format:
-  low_mag_cam-{timestamp_us}-{session}-{...}-{x}-{y}-{w}-{h}_rawcolor.jpg
+  low_mag_cam-{timestamp_us}-{session}-{frame}-{roi_idx}-{x}-{y}-{w}-{h}_rawcolor.jpg
   Last 4 dash-separated numbers before _rawcolor are x, y, w, h (pixels).
 
 Inputs:
@@ -54,13 +54,12 @@ def parse_filename(fname: str) -> dict | None:
     parts = stem.split('-')
 
     # Need at least: cam_name, timestamp, session, …, x, y, w, h  (≥6 parts)
-    # and all of the last 4 + parts[1] must be integers
+    # and all of the last 4 + parts[1] must be integers.
+    # parts[-5] is the zero-padded ROI index within the camera frame, not a coordinate.
     if len(parts) < 6:
         return None
-    # Format: …-{y}-{x}-{h}-{w}-{ignored}_rawcolor.ext
-    # parts[-5]=y, parts[-4]=x, parts[-3]=h, parts[-2]=w; parts[-1] is discarded.
     try:
-        y, x, h, w = int(parts[-5]), int(parts[-4]), int(parts[-3]), int(parts[-2])
+        x, y, w, h = int(parts[-4]), int(parts[-3]), int(parts[-2]), int(parts[-1])
         timestamp_us = int(parts[1])
     except (ValueError, IndexError):
         return None
@@ -506,7 +505,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         '-o', '--output',
         default=None,
-        help='Output CSV path. Default: <input_stem>_dedup.csv',
+        help='Output path; written as parquet when it ends in .parquet, '
+             'otherwise CSV. Default: <input_stem>_dedup.csv',
     )
     p.add_argument(
         '--sigma-xy',
@@ -644,7 +644,10 @@ def main() -> None:
         output_cols += [c for c in result.columns if c not in output_cols and c not in hidden]
     else:
         output_cols = [c for c in preferred if c in result.columns]
-    result[output_cols].to_csv(output_path, index=False)
+    if Path(output_path).suffix.lower() == '.parquet':
+        result[output_cols].to_parquet(output_path, index=False)
+    else:
+        result[output_cols].to_csv(output_path, index=False)
     print(f"\nOutput written to: {output_path}")
 
 

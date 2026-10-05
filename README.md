@@ -24,7 +24,7 @@ depth from `localizations.csv`. CFE lab parquet files already carry
 Box position is still parsed from the filename:
 
 ```
-low_mag_cam-{timestamp_us}-{session}-…-{y}-{x}-{h}-{w}-{ignored}_rawcolor.jpg
+low_mag_cam-{timestamp_us}-{session}-{frame}-{roi_idx}-{x}-{y}-{w}-{h}_rawcolor.jpg
 ```
 
 The box center `(cx, cy)` is computed as `(x + w/2, y + h/2)`.
@@ -74,7 +74,7 @@ python3 -m venv .venv
 source .venv/bin/activate        # Windows: .venv\Scripts\activate
 
 # 3. Install dependencies
-pip install numpy pandas scipy Pillow matplotlib
+pip install numpy pandas scipy Pillow matplotlib pyarrow
 
 # 4. Run de-duplication
 python src/hungarian_dedup.py data/ptvr_lm/localizations.csv \
@@ -91,11 +91,47 @@ python src/visualize_dedup.py \
 Expected output from step 4 (default thresholds):
 
 ```
-177 detections → 83 unique track(s)
- 94 duplicate(s) identified (53.1%)
+177 detections → 89 unique track(s)
+ 88 duplicate(s) identified (49.7%)
 ```
 
 The GIF written in step 5 is the same animation shown at the top of this README.
+
+---
+
+## CFE lab parquet example
+
+`data/April_20_2026_lowmag_level2_with_depth_time_with_depth_time_tiny.parquet`
+is a 200-detection sample from the April 20 2026 Ahi deployment with columns
+`filename`, `epoch_seconds`, `time`, `depth`, and the `dinov3_v32_v3` label and
+score. `filename` is relative to the low-mag camera directory, so pass
+`--base-path` to store the full image path.
+
+The low-mag camera runs at about 10 Hz, so frames are ~0.1 s apart. The CSV
+defaults (`--frame-gap 2.0`, `--time-gate 600`) would put all 60 camera frames
+in one burst and merge every detection into a single track. Use one burst per
+camera frame, compare only nearby frames, and a tighter spatial scale:
+
+```bash
+python src/hungarian_dedup.py \
+    data/April_20_2026_lowmag_level2_with_depth_time_with_depth_time_tiny.parquet \
+    --base-path /Volumes/DeepSea-AI/data/Planktivore/raw/2026_April_20_Ahi-Planktivore/low_mag_cam/ \
+    --frame-gap 0.05 \
+    --time-gate 0.25 \
+    --sigma-xy 20 \
+    -o data/April_20_2026_lowmag_level2_with_depth_time_with_depth_time_tiny_dedup.parquet \
+    --verbose
+```
+
+On Linux the share is usually mounted at `/mnt/DeepSea-AI/...`. Output is
+written as parquet when `-o` ends in `.parquet`, otherwise CSV.
+
+Expected output:
+
+```
+200 detections → 199 unique track(s)
+  1 duplicate(s) identified (0.5%)
+```
 
 ---
 
@@ -112,12 +148,6 @@ python src/hungarian_dedup.py data/ptvr_lm/localizations.csv \
     --max-cost 1.5 \
     --frame-gap 2.0 \
     --time-gate 600
-
-# CFE lab parquet (filename is relative to the camera directory):
-python src/hungarian_dedup.py \
-    data/April_20_2026_lowmag_level2_with_depth_time_with_depth_time_tiny.parquet \
-    --base-path /mnt/DeepSea-AI/data/Planktivore/raw/2026_April_20_Ahi-Planktivore/low_mag_cam/ \
-    -o data/April_20_2026_lowmag_dedup.csv
 
 # Visualise results:
 python src/visualize_dedup.py \
