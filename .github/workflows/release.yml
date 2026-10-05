@@ -1,0 +1,49 @@
+name: New Release
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+jobs:
+  semantic_release:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Poetry
+        run: |
+          curl -sSL https://install.python-poetry.org | python3 -
+          echo "${HOME}/.local/bin" >> $GITHUB_PATH
+
+      - name: Install dependencies
+        run: poetry install
+
+      - name: Set PYTHONPATH
+        run: echo "PYTHONPATH=src:." >> $GITHUB_ENV
+
+      - name: Release to GitHub
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          pip install python-semantic-release
+          semantic-release version --changelog
+
+      - name: Clean up build artifacts
+        if: always()
+        run: rm -rf dist/
+
+      - name: Clear Poetry cache
+        if: always()
+        run: poetry cache clear pypi --all
