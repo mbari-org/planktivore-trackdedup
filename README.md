@@ -43,6 +43,11 @@ and accept matches whose Euclidean distance is ≤ `--max-cost`.
 A Union-Find structure propagates track identity through all accepted matches,
 so a particle seen three or more times is grouped into a single track.
 
+When the input has a dinov3 label column (e.g. `dinov3_v32_v3`), only
+detections with the same label are merged, so a `circle_1` is never matched to
+an `aggregate`. Rows with a missing label are not blocked. Without a dinov3
+column the label gate is skipped.
+
 The output CSV adds four columns to the input:
 
 | Column | Description |

@@ -305,7 +305,16 @@ def make_pair_frame(
         ('depth (dup)', f'{duplicate["depth"]:.2f} m'
                          if pd.notna(duplicate['depth']) else 'n/a'),
     ]
+    if 'Label' in df.columns:
+        rows += [
+            ('',         ''),
+            ('label (canonical)', str(canonical['Label'])),
+            ('label (dup)',       str(duplicate['Label'])),
+        ]
 
+    n_text = sum(1 for label, _ in rows if label)
+    n_gap = len(rows) - n_text
+    step = min(0.075, (0.95 - 0.04 * n_gap) / n_text)
     y = 0.97
     for label, val in rows:
         if label == '':
@@ -316,7 +325,7 @@ def make_pair_frame(
         ax_meta.text(0.95, y, val,   transform=ax_meta.transAxes,
                      color=TEXT_COLOR, fontsize=8, va='top', ha='right',
                      fontweight='bold')
-        y -= 0.075
+        y -= step
 
     # --- Mini-map ---
     depth_vals = df['depth'].values

@@ -114,6 +114,20 @@ def _datetime_to_time_s(series: pd.Series) -> pd.Series:
     return (dt - epoch).dt.total_seconds()
 
 
+def find_dinov3_label_column(columns) -> str | None:
+    """Return the dinov3 model label column (not its -score column), if any."""
+    label_cols = sorted(
+        str(name) for name in columns
+        if str(name).lower().startswith('dinov3')
+        and not str(name).lower().endswith('-score')
+    )
+    if not label_cols:
+        return None
+    if len(label_cols) > 1:
+        print(f"  Warning: several dinov3 label columns {label_cols}; using {label_cols[0]!r}.")
+    return label_cols[0]
+
+
 def _map_model_label(df: pd.DataFrame) -> pd.DataFrame:
     """Copy a dinov3 label/score pair onto Label and score when those are absent."""
     if 'label' in df.columns and 'Label' not in df.columns:
@@ -121,15 +135,10 @@ def _map_model_label(df: pd.DataFrame) -> pd.DataFrame:
     if 'Label' in df.columns:
         return df
 
-    label_cols = [
-        name for name in df.columns
-        if str(name).lower().startswith('dinov3')
-        and not str(name).lower().endswith('-score')
-    ]
-    if len(label_cols) != 1:
+    label_col = find_dinov3_label_column(df.columns)
+    if label_col is None:
         return df
 
-    label_col = label_cols[0]
     df['Label'] = df[label_col]
     score_col = f'{label_col}-score'
     if score_col in df.columns and 'score' not in df.columns:
@@ -308,12 +317,21 @@ class UnionFind:
 # Core: Hungarian matching between two frame groups
 # ---------------------------------------------------------------------------
 
+def label_mismatch(labels_a: np.ndarray, labels_b: np.ndarray) -> np.ndarray:
+    """Boolean matrix, True where both labels are present and differ."""
+    known_a = pd.notna(labels_a)[:, None]
+    known_b = pd.notna(labels_b)[None, :]
+    differ = labels_a[:, None] != labels_b[None, :]
+    return known_a & known_b & differ
+
+
 def match_frames(
     indices_a: list[int],
     indices_b: list[int],
     features: np.ndarray,
     max_cost: float,
-) -> list[tuple[int, int]]:
+    labels: np.ndarray | None = None,
+) -> tuple[list[tuple[int, int]], int]:
     """
     Match detections in frame_a against detections in frame_b using
     the Hungarian algorithm on the cdist cost matrix.
@@ -323,13 +341,23 @@ def match_frames(
     indices_a, indices_b : row indices into `features`
     features : (N, D) normalized feature array
     max_cost : pairs with cost > max_cost are not linked
+    labels   : optional per-row class labels; pairs whose labels differ are
+               never linked
 
-    Returns list of (idx_a, idx_b) pairs that are matched below max_cost.
+    Returns the (idx_a, idx_b) pairs matched below max_cost, and the number
+    of within-max_cost candidate pairs rejected for differing labels.
     """
     feat_a = features[indices_a]
     feat_b = features[indices_b]
 
     cost_matrix = cdist(feat_a, feat_b, metric='euclidean')
+
+    n_label_rejects = 0
+    if labels is not None:
+        mismatch = label_mismatch(labels[indices_a], labels[indices_b])
+        n_label_rejects = int((mismatch & (cost_matrix <= max_cost)).sum())
+        # Finite so linear_sum_assignment stays feasible; still above max_cost.
+        cost_matrix[mismatch] = max_cost + 1e6
 
     # linear_sum_assignment minimizes total cost
     row_ind, col_ind = linear_sum_assignment(cost_matrix)
@@ -339,7 +367,7 @@ def match_frames(
         if cost_matrix[r, c] <= max_cost:
             matches.append((indices_a[r], indices_b[c]))
 
-    return matches
+    return matches, n_label_rejects
 
 
 # ---------------------------------------------------------------------------
@@ -355,6 +383,7 @@ def deduplicate(
     frame_gap_s: float = 2.0,
     time_gate_s: float = 600.0,
     use_time_in_cost: bool = False,
+    label_col: str | None = None,
 ) -> pd.DataFrame:
     """
     Run Hungarian de-duplication.
@@ -380,6 +409,9 @@ def deduplicate(
     frame_gap_s : time gap (s) that separates imaging bursts
     time_gate_s : only compare frame pairs whose midpoints are ≤ this apart
     use_time_in_cost : include |Δt|/σ_time in the feature vector
+    label_col   : optional class-label column (e.g. dinov3_v32_v3); detections
+                  with different labels are never merged. Missing labels
+                  do not block a match.
     """
     df = df.copy()
 
@@ -421,9 +453,12 @@ def deduplicate(
         for fid in frame_ids_sorted
     }
 
+    labels = df[label_col].to_numpy(dtype=object) if label_col else None
+
     within_matches = 0
     cross_pairs = 0
     cross_matches = 0
+    label_rejects = 0
 
     # --- Pass 1: within-frame duplicates ---
     # Two detections in the same burst are duplicates if their normalised
@@ -436,6 +471,10 @@ def deduplicate(
             continue
         feat = features[idx_list]
         dists = cdist(feat, feat, metric='euclidean')
+        if labels is not None:
+            mismatch = label_mismatch(labels[idx_list], labels[idx_list])
+            label_rejects += int(np.triu(mismatch & (dists <= max_cost), k=1).sum())
+            dists[mismatch] = np.inf
         for ii in range(len(idx_list)):
             for jj in range(ii + 1, len(idx_list)):
                 if dists[ii, jj] <= max_cost:
@@ -455,14 +494,18 @@ def deduplicate(
             idx_b = frame_groups[fid_b]
             cross_pairs += 1
 
-            matches = match_frames(idx_a, idx_b, features, max_cost)
+            matches, n_rejects = match_frames(idx_a, idx_b, features, max_cost, labels)
             for a, b in matches:
                 uf.union(a, b)
             cross_matches += len(matches)
+            label_rejects += n_rejects
 
     print(f"  Within-frame: {within_matches} duplicate pair(s) merged.")
     print(f"  Cross-frame:  compared {cross_pairs} burst pair(s), "
           f"found {cross_matches} match(es).")
+    if labels is not None:
+        print(f"  Label gate:   rejected {label_rejects} close pair(s) "
+              f"with different {label_col} labels.")
 
     # Assign track IDs (0-based, ordered by first appearance)
     raw_roots = [uf.find(i) for i in range(n)]
@@ -587,6 +630,12 @@ def main() -> None:
     print(f"  {n_frames} imaging burst(s) detected "
           f"(frame_gap={args.frame_gap} s).")
 
+    label_col = find_dinov3_label_column(df.columns)
+    if label_col:
+        print(f"  Label gate on: only detections with the same {label_col} label are merged.")
+    else:
+        print("  Label gate skipped: no dinov3 label column.")
+
     print("\nRunning Hungarian de-duplication ...")
     print(f"  sigma_xy={args.sigma_xy} px  sigma_depth={args.sigma_depth} m  "
           f"max_cost={args.max_cost}  time_gate={args.time_gate} s")
@@ -600,6 +649,7 @@ def main() -> None:
         frame_gap_s=args.frame_gap,
         time_gate_s=args.time_gate,
         use_time_in_cost=args.use_time_in_cost,
+        label_col=label_col,
     )
 
     n_tracks = result['track_id'].nunique()
