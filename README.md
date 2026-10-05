@@ -21,7 +21,7 @@ image filenames:
 low_mag_cam-{timestamp_us}-{session}-…-{y}-{x}-{h}-{w}-{ignored}_rawcolor.jpg
 ```
 
-The box centre `(cx, cy)` is computed as `(x + w/2, y + h/2)`.
+The box center `(cx, cy)` is computed as `(x + w/2, y + h/2)`.
 Depth and label information come from an accompanying `localizations.csv`.
 
 Matching runs in two passes using `scipy.spatial.distance.cdist` and
@@ -50,7 +50,7 @@ The output CSV adds four columns to the input:
 
 ## Full example
 
-From the repository root (`trackdedup/`):
+From the repository root (`planktivore-trackdedup/`):
 
 ```bash
 # 1. Extract the sample dataset
