@@ -1,6 +1,6 @@
-# trackdedup
+# planktivore-trackdedup
 
-Hungarian-algorithm de-duplication of in-situ particle detections.
+Hungarian-algorithm de-duplication of in-situ particle detections in Planktivore data.
 
 The same physical particle can appear in multiple images during a single
 imaging burst (detector overlap) or across successive bursts as the camera
