@@ -4,7 +4,7 @@ build-backend = "poetry.core.masonry.api"
 
 [tool.poetry]
 name = "trackdedup"
-version = "0.0.0"
+version = "0.1.0"
 description = "Hungarian-algorithm de-duplication of in-situ particle detections"
 authors = ["Danelle Cline <dcline@mbari.org>"]
 readme = "README.md"
