@@ -1,7 +1,7 @@
 # trackdedup
 [![semantic-release](https://img.shields.io/badge/%20%20%F0%9F%93%A6%F0%9F%9A%80-semantic--release-e10079.svg)](https://github.com/semantic-release/semantic-release)
 
-Hungarian-algorithm de-duplication of in-situ particle detections.
+Hungarian-algorithm de-duplication of in-situ particle detections in Planktivore data.
 
 The same physical particle can appear in multiple images during a single
 imaging burst (detector overlap) or across successive bursts as the camera
@@ -22,7 +22,7 @@ image filenames:
 low_mag_cam-{timestamp_us}-{session}-…-{y}-{x}-{h}-{w}-{ignored}_rawcolor.jpg
 ```
 
-The box centre `(cx, cy)` is computed as `(x + w/2, y + h/2)`.
+The box center `(cx, cy)` is computed as `(x + w/2, y + h/2)`.
 Depth and label information come from an accompanying `localizations.csv`.
 
 Matching runs in two passes using `scipy.spatial.distance.cdist` and
@@ -51,7 +51,7 @@ The output CSV adds four columns to the input:
 
 ## Full example
 
-From the repository root (`trackdedup/`):
+From the repository root (`planktivore-trackdedup/`):
 
 ```bash
 # 1. Extract the sample dataset
